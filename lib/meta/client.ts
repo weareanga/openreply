@@ -1,11 +1,23 @@
-import { getMetaGraphApiVersion, requireEnv } from "@/lib/env";
+import { getMetaGraphApiVersion } from "@/lib/env";
 
+// Feature calls go to graph.facebook.com: connections are made through
+// Unified Login (Facebook Login for Business), whose Business Integration
+// System User tokens live on the Facebook host and address the Instagram
+// account by its professional ID. graph.instagram.com only accepts tokens
+// from the Instagram Login flow, which newer Meta apps can no longer use.
 function instagramGraphBase() {
-  return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
+  return facebookGraphBase();
 }
 
 function facebookGraphBase() {
   return `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
+}
+
+// Only pre-migration Instagram Login connections still talk to this host:
+// their long-lived tokens refresh through ig_refresh_token, which exists
+// nowhere else. Unified Login tokens do not expire and are never refreshed.
+function legacyInstagramGraphBase() {
+  return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
 }
 
 export class MetaApiError extends Error {
@@ -70,8 +82,10 @@ interface GraphApiError {
 
 export interface InstagramUser {
   id: string;
-  // Instagram professional account ID. This — not `id` (the app-scoped ID) —
-  // is what appears as entry.id in webhooks and is used by the messaging API.
+  // Legacy Instagram Login field for the professional account ID. On the
+  // Unified Login path `id` already IS that ID — the one webhooks carry as
+  // entry.id and the messaging API addresses — so this stays unset there.
+  // The Zernio provider mapping still populates it.
   user_id?: string;
   username: string;
   name?: string;
@@ -664,11 +678,156 @@ export async function getConversationMessages(
   return data.messages?.data ?? [];
 }
 
-export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
-  const url = new URL(`${instagramGraphBase()}/me`);
+export interface AssignedInstagramAccount {
+  id: string;
+  username?: string;
+}
+
+interface InstagramAccountListPage {
+  data?: Array<{ id?: string | number; username?: string }>;
+  paging?: { cursors?: { after?: string } };
+}
+
+function collectAccounts(
+  rows: Array<{ id?: string | number; username?: string }> | undefined,
+  into: Map<string, AssignedInstagramAccount>
+): void {
+  for (const row of rows ?? []) {
+    if (row.id != null) {
+      into.set(String(row.id), { id: String(row.id), username: row.username });
+    }
+  }
+}
+
+async function fetchAssignedInstagramAccounts(
+  accessToken: string
+): Promise<AssignedInstagramAccount[]> {
+  const accounts = new Map<string, AssignedInstagramAccount>();
+  const seenCursors = new Set<string>();
+  let after: string | undefined;
+
+  // Meta documents cursor pagination without a guaranteed `next` URL, so
+  // rebuild each page on our host (as getConversations does) instead of
+  // following paging.next. A cursor may outlive the final non-empty page, so
+  // an empty page is a normal end, not an error.
+  for (let page = 0; page < 100; page++) {
+    const url = new URL(`${facebookGraphBase()}/me/assigned_instagram_accounts`);
+    url.searchParams.set("fields", "id,username");
+    if (after) url.searchParams.set("after", after);
+
+    const result = await handleResponse<InstagramAccountListPage>(
+      await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+    );
+
+    const rows = result.data ?? [];
+    collectAccounts(rows, accounts);
+
+    const next = result.paging?.cursors?.after;
+    if (!rows.length || !next || next === after) break;
+    if (seenCursors.has(next)) {
+      throw new Error("Instagram account discovery pagination did not advance");
+    }
+    seenCursors.add(next);
+    after = next;
+  }
+
+  return [...accounts.values()];
+}
+
+async function fetchBusinessInstagramAccounts(
+  accessToken: string
+): Promise<AssignedInstagramAccount[]> {
+  const accounts = new Map<string, AssignedInstagramAccount>();
+
+  let businessId: string | undefined;
+  try {
+    const url = new URL(`${facebookGraphBase()}/me`);
+    url.searchParams.set("fields", "client_business_id");
+    const me = await handleResponse<{ client_business_id?: string }>(
+      await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+    );
+    businessId = me.client_business_id;
+  } catch (err) {
+    console.warn(
+      "[Instagram] Could not read client_business_id for account discovery:",
+      err instanceof Error ? err.message : err
+    );
+    return [];
+  }
+  if (!businessId) return [];
+
+  // The asset assignment can be recorded in Business Manager without
+  // surfacing on assigned_instagram_accounts — a known Unified Login failure
+  // mode — so read the portfolio's own asset edges as well: owned accounts
+  // first, then accounts shared into the portfolio. Either edge failing (for
+  // example, a missing business_management grant) is logged, not fatal.
+  for (const edge of [
+    "owned_instagram_accounts",
+    "client_instagram_accounts",
+  ] as const) {
+    try {
+      const url = new URL(`${facebookGraphBase()}/${businessId}/${edge}`);
+      url.searchParams.set("fields", "id,username");
+      const result = await handleResponse<InstagramAccountListPage>(
+        await fetch(url.toString(), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        })
+      );
+      collectAccounts(result.data, accounts);
+    } catch (err) {
+      console.warn(
+        `[Instagram] Business account discovery via ${edge} failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  return [...accounts.values()];
+}
+
+/**
+ * Discover the Instagram professional accounts a Unified Login token can
+ * act on. The documented source is /me/assigned_instagram_accounts; when it
+ * returns an empty list — a failure mode Meta's own community reports with
+ * no fix — fall back to the client business portfolio's Instagram asset
+ * edges before giving up. What each source returned is logged (IDs and
+ * usernames only, never the token) because an empty result here is
+ * otherwise indistinguishable from a misconfigured consent.
+ */
+export async function getAssignedInstagramAccounts(
+  accessToken: string
+): Promise<AssignedInstagramAccount[]> {
+  const assigned = await fetchAssignedInstagramAccounts(accessToken);
+  console.info(
+    "[Instagram] assigned_instagram_accounts returned",
+    assigned.map((a) => ({ id: a.id, username: a.username }))
+  );
+  if (assigned.length > 0) return assigned;
+
+  const business = await fetchBusinessInstagramAccounts(accessToken);
+  console.info(
+    "[Instagram] Business portfolio account discovery returned",
+    business.map((a) => ({ id: a.id, username: a.username }))
+  );
+  return business;
+}
+
+export async function getUserInfo(
+  accessToken: string,
+  instagramAccountId: string
+): Promise<InstagramUser> {
+  // Under Unified Login /me is the business integration system user, not the
+  // Instagram account, so the profile is read from the account node itself.
+  // The returned id is the professional account ID; this host has no
+  // separate user_id field.
+  const url = new URL(`${instagramGraphBase()}/${instagramAccountId}`);
   url.searchParams.set(
     "fields",
-    "id,user_id,username,name,profile_picture_url,followers_count"
+    "id,username,name,profile_picture_url,followers_count"
   );
   url.searchParams.set("access_token", accessToken);
 
@@ -684,9 +843,12 @@ const MEDIA_PAGE_SIZE = 100;
 
 export async function getUserMedia(
   accessToken: string,
+  instagramAccountId: string,
   limit = 25
 ): Promise<InstagramMedia[]> {
-  const url = new URL(`${instagramGraphBase()}/me/media`);
+  // Addressed to the account node: /me is the system user under Unified
+  // Login and has no media edge.
+  const url = new URL(`${instagramGraphBase()}/${instagramAccountId}/media`);
   url.searchParams.set("fields", MEDIA_FIELDS);
   url.searchParams.set("limit", limit.toString());
   url.searchParams.set("access_token", accessToken);
@@ -704,11 +866,12 @@ export async function getUserMedia(
  */
 export async function getAllUserMedia(
   accessToken: string,
+  instagramAccountId: string,
   max = 500
 ): Promise<InstagramMedia[]> {
   const results: InstagramMedia[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/me/media`);
+  const first = new URL(`${instagramGraphBase()}/${instagramAccountId}/media`);
   first.searchParams.set("fields", MEDIA_FIELDS);
   first.searchParams.set("limit", String(Math.min(MEDIA_PAGE_SIZE, max)));
   first.searchParams.set("access_token", accessToken);
@@ -827,27 +990,17 @@ export async function getFollowerCountSeries(
   }
 }
 
-export async function getLongLivedToken(
-  shortLivedToken: string
-): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/access_token`);
-  url.searchParams.set("grant_type", "ig_exchange_token");
-  url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
-  url.searchParams.set("access_token", shortLivedToken);
-
-  const response = await fetch(url.toString());
-  const data = await handleResponse<TokenResponse>(response);
-
-  return {
-    accessToken: data.access_token,
-    expiresIn: data.expires_in ?? 5184000,
-  };
-}
-
+/**
+ * Refresh a long-lived token issued by the retired Instagram Login flow.
+ * Only connections made before the Unified Login migration can use this —
+ * ig_refresh_token exists only on graph.instagram.com. Unified Login (BISU)
+ * tokens do not expire and are never refreshed; the refresh cron skips
+ * accounts whose stored token has no expiry.
+ */
 export async function refreshLongLivedToken(
   longLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/refresh_access_token`);
+  const url = new URL(`${legacyInstagramGraphBase()}/refresh_access_token`);
   url.searchParams.set("grant_type", "ig_refresh_token");
   url.searchParams.set("access_token", longLivedToken);
 
