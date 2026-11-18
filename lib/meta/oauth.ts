@@ -5,15 +5,18 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "crypto";
-import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
+import { getEncryptionKeyHex, getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
-// Instagram API with Instagram Login authorizes on www.instagram.com. The old
-// api.instagram.com/oauth/authorize host belonged to the retired Basic Display
-// API and now 404s ("Sorry, this page isn't available"), which looks like a bad
-// link rather than a wrong endpoint. The token exchange below still lives on
-// api.instagram.com — only the authorize hop moved.
-const INSTAGRAM_OAUTH_URL = "https://www.instagram.com/oauth/authorize";
-const INSTAGRAM_TOKEN_URL = "https://api.instagram.com/oauth/access_token";
+// Instagram connections use Unified Login: a Facebook Login for Business
+// configuration. The authorize hop is Facebook's OAuth dialog, keyed by the
+// configuration's config_id — there is no scope parameter, because the
+// configuration itself declares the assets and permissions being requested.
+// The classic Instagram Login authorize host (www.instagram.com/oauth/authorize)
+// rejects newer Meta apps with "Invalid platform app": apps created since
+// Meta's Unified Login rollout only offer the Unified setup. The code
+// exchange lives on graph.facebook.com and returns the final Business
+// Integration System User token directly — no second exchange hop.
+const FACEBOOK_OAUTH_URL = "https://www.facebook.com/dialog/oauth";
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
@@ -90,46 +93,57 @@ export function verifyOAuthState(state: string | null): OAuthStatePayload | null
 export function getAuthorizationUrl(redirectUri: string, state: string): string {
   const params = new URLSearchParams({
     client_id: requireEnv("INSTAGRAM_APP_ID"),
+    config_id: requireEnv("INSTAGRAM_CONFIG_ID"),
     redirect_uri: redirectUri,
-    scope:
-      "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_manage_insights",
     response_type: "code",
+    // Show both the Facebook and Instagram sign-in choices even when the
+    // browser is already signed in to Facebook — Meta documents prompt=login
+    // for exactly this.
+    prompt: "login",
     state,
   });
 
-  return `${INSTAGRAM_OAUTH_URL}?${params.toString()}`;
+  return `${FACEBOOK_OAUTH_URL}?${params.toString()}`;
 }
 
 export async function exchangeCodeForToken(
   code: string,
   redirectUri: string
-): Promise<{ accessToken: string; userId: string }> {
-  const body = new URLSearchParams({
-    client_id: requireEnv("INSTAGRAM_APP_ID"),
-    client_secret: requireEnv("INSTAGRAM_APP_SECRET"),
-    grant_type: "authorization_code",
-    redirect_uri: redirectUri,
-    code,
-  });
+): Promise<{ accessToken: string; expiresIn: number | null }> {
+  const url = new URL(
+    `https://graph.facebook.com/${getMetaGraphApiVersion()}/oauth/access_token`
+  );
+  url.searchParams.set("client_id", requireEnv("INSTAGRAM_APP_ID"));
+  url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("code", code);
 
-  const response = await fetch(INSTAGRAM_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  // The URL carries the app secret — never log it.
+  const response = await fetch(url.toString());
+  const data = await response.json();
 
-  if (!response.ok) {
-    const error = await response.json();
+  if (
+    !response.ok ||
+    data.error ||
+    typeof data.access_token !== "string" ||
+    !data.access_token
+  ) {
     throw new Error(
-      `Token exchange failed: ${error.error_message || JSON.stringify(error)}`
+      `Token exchange failed: ${data.error?.message || JSON.stringify(data)}`
     );
   }
 
-  const data = await response.json();
-  return {
-    accessToken: data.access_token,
-    userId: String(data.user_id),
-  };
+  // A non-expiring system-user configuration omits expires_in entirely. Only
+  // a positive number is a real lifetime; anything else means the returned
+  // token does not expire, and the caller stores that instead of a date.
+  const expiresIn =
+    typeof data.expires_in === "number" &&
+    Number.isFinite(data.expires_in) &&
+    data.expires_in > 0
+      ? data.expires_in
+      : null;
+
+  return { accessToken: data.access_token, expiresIn };
 }
 
 function getEncryptionKey(): Buffer {

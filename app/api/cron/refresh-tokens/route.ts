@@ -29,31 +29,46 @@ export async function GET(request: NextRequest) {
     },
   });
 
+  // Accounts with no stored expiry are selected on purpose: Unified Login
+  // (BISU) tokens do not expire and have no refresh grant, and the loop below
+  // records them as skipped. Leaving them out of the query would make that
+  // skip invisible; attempting ig_refresh_token on them would record a
+  // spurious failure every run.
   const accountsToRefresh = await prisma.instagramAccount.findMany({
     where: {
       accessToken: { not: "" },
       provider: "META",
-      tokenExpiresAt: {
-        not: null,
-        lte: cutoffDate,
-      },
+      OR: [
+        { tokenExpiresAt: null },
+        { tokenExpiresAt: { lte: cutoffDate } },
+      ],
     },
     select: {
       id: true,
       workspaceId: true,
       username: true,
       accessToken: true,
+      tokenExpiresAt: true,
     },
   });
 
   const results: Array<{
     instagramAccountId: string;
     username: string;
-    status: "refreshed" | "failed";
+    status: "refreshed" | "skipped" | "failed";
     error?: string;
   }> = [];
 
   for (const account of accountsToRefresh) {
+    if (account.tokenExpiresAt === null) {
+      results.push({
+        instagramAccountId: account.id,
+        username: account.username,
+        status: "skipped",
+      });
+      continue;
+    }
+
     try {
       const currentToken = decryptToken(account.accessToken);
       const { accessToken: newToken, expiresIn } =
