@@ -294,6 +294,10 @@ model TrackedLink {
   slug           String   @unique
   label          String?
   destinationUrl String
+  // Optional second destination for the primary link: visitors in Brazil are
+  // redirected here by /r instead of destinationUrl. Null sends everyone to
+  // destinationUrl.
+  destinationUrlBr String?
   // Which DM button this link is, starting at 0. Read links with
   // TRACKED_LINK_ORDER (lib/tracking/link-order.ts), never by createdAt alone:
   // links saved in one request share a createdAt, and Postgres returns tied
