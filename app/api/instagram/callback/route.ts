@@ -3,7 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
 import { getBaseUrl } from "@/lib/env";
 import { canConnectInstagramAccount } from "@/lib/instagram-accounts";
-import { getLongLivedToken, getUserInfo, subscribeInstagramAccountToWebhooks } from "@/lib/meta/client";
+import { getAssignedInstagramAccounts, getUserInfo, subscribeInstagramAccountToWebhooks } from "@/lib/meta/client";
 import {
   encryptToken,
   exchangeCodeForToken,
@@ -43,18 +43,34 @@ export async function GET(request: NextRequest) {
 
   try {
     const redirectUri = `${baseUrl}/api/instagram/callback`;
-    const { accessToken: shortLivedToken } = await exchangeCodeForToken(
+    // Unified Login returns the final Business Integration System User token
+    // from the single exchange — there is no long-lived exchange hop, and
+    // /me on the token is the system user, not the Instagram account. The
+    // account(s) the client shared come from account discovery instead.
+    const { accessToken, expiresIn } = await exchangeCodeForToken(
       code,
       redirectUri
     );
-    const { accessToken: longLivedToken, expiresIn } =
-      await getLongLivedToken(shortLivedToken);
-    const userInfo = await getUserInfo(longLivedToken);
-    // Webhooks and the messaging API key off the professional account ID
-    // (user_id), not the app-scoped `id`. Store user_id so comment webhooks
-    // can be matched back to this account. Fall back to id if user_id is
-    // ever absent.
-    const instagramId = userInfo.user_id ?? userInfo.id;
+    const accounts = await getAssignedInstagramAccounts(accessToken);
+    if (accounts.length === 0) {
+      throw new Error(
+        "No Instagram account was shared with the app. Check that the account is a professional account in the selected business portfolio, then try connecting again."
+      );
+    }
+    // One connection per workspace flow: connect the first shared account
+    // and log the rest, so a client who shared several can see in the logs
+    // why the others were not connected.
+    const [selected, ...additionalAccounts] = accounts;
+    if (additionalAccounts.length > 0) {
+      console.info(
+        "[Instagram Callback] Additional shared accounts not connected:",
+        additionalAccounts.map((a) => ({ id: a.id, username: a.username }))
+      );
+    }
+    const userInfo = await getUserInfo(accessToken, selected.id);
+    // The discovered id is the professional account ID — the same ID
+    // webhooks carry as entry.id and the messaging API addresses.
+    const instagramId = selected.id;
     const connection = await canConnectInstagramAccount({
       workspaceId: state.workspaceId,
       instagramId,
@@ -66,14 +82,19 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const encryptedToken = encryptToken(longLivedToken);
-    const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+    const encryptedToken = encryptToken(accessToken);
+    // A non-expiring BISU token reports no expires_in. Store null (the
+    // column is nullable) rather than inventing a date, so the refresh cron
+    // skips the account and the settings page shows no fabricated expiry.
+    const tokenExpiresAt = expiresIn
+      ? new Date(Date.now() + expiresIn * 1000)
+      : null;
 
     let webhookSubscribed = false;
     try {
       const subscription = await subscribeInstagramAccountToWebhooks(
         instagramId,
-        longLivedToken
+        accessToken
       );
       webhookSubscribed = Boolean(subscription.success);
     } catch (subscriptionError) {
