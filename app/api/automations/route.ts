@@ -61,6 +61,13 @@ const createAutomationSchema = z
       .union([z.string().url(), z.literal("")])
       .optional()
       .nullable(),
+    // Optional Brazil-store destination for the primary tracked link:
+    // visitors in Brazil are redirected there instead. An empty string
+    // clears it.
+    trackedDestinationUrlBr: z
+      .union([z.string().url(), z.literal("")])
+      .optional()
+      .nullable(),
     // Optional second tracked link, rendered as a second DM button.
     secondaryDestinationUrl: z
       .union([z.string().url(), z.literal("")])
@@ -123,6 +130,11 @@ const updateAutomationSchema = z.object({
     .union([z.string().url(), z.literal("")])
     .optional()
     .nullable(),
+  // Same semantics for the primary link's Brazil-store destination.
+  trackedDestinationUrlBr: z
+    .union([z.string().url(), z.literal("")])
+    .optional()
+    .nullable(),
   // Same semantics for the optional second tracked link / DM button.
   secondaryDestinationUrl: z
     .union([z.string().url(), z.literal("")])
@@ -161,6 +173,7 @@ export async function GET(request: NextRequest) {
           slug: true,
           label: true,
           destinationUrl: true,
+          destinationUrlBr: true,
           _count: { select: { clicks: true } },
         },
         orderBy: TRACKED_LINK_ORDER,
@@ -354,6 +367,7 @@ export async function POST(request: NextRequest) {
   const linkCreates = buildInitialCampaignLinks({
     workspaceId,
     primaryUrl: parsed.data.trackedDestinationUrl,
+    primaryUrlBr: parsed.data.trackedDestinationUrlBr,
     secondaryUrl: parsed.data.secondaryDestinationUrl,
     secondaryLabel: parsed.data.secondaryButtonLabel,
   });
@@ -487,6 +501,7 @@ export async function PATCH(request: NextRequest) {
 
   const {
     trackedDestinationUrl,
+    trackedDestinationUrlBr,
     secondaryDestinationUrl,
     secondaryButtonLabel,
     ...automationData
@@ -555,6 +570,7 @@ export async function PATCH(request: NextRequest) {
       workspaceId,
       automationId,
       primaryUrl: trackedDestinationUrl,
+      primaryUrlBr: trackedDestinationUrlBr,
       secondaryUrl: secondaryDestinationUrl,
       secondaryLabel: secondaryButtonLabel,
     });
