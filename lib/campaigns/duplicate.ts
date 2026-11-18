@@ -73,6 +73,7 @@ export async function duplicateCampaign({
           slug: generateTrackedLinkSlug(),
           label: link.label,
           destinationUrl: link.destinationUrl,
+          destinationUrlBr: link.destinationUrlBr,
           position,
         })),
       },

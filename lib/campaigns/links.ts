@@ -12,6 +12,10 @@ type LinkFields = {
   // For each URL: a URL sets the link, an empty string removes it, and null or
   // undefined leaves it untouched.
   primaryUrl?: string | null;
+  // The primary link's Brazil-store destination, with the same set / remove /
+  // leave semantics. It lives on the primary link, so it only takes effect
+  // while that link exists.
+  primaryUrlBr?: string | null;
   secondaryUrl?: string | null;
   secondaryLabel?: string | null;
 };
@@ -22,6 +26,7 @@ type LinkFields = {
 export function buildInitialCampaignLinks({
   workspaceId,
   primaryUrl,
+  primaryUrlBr,
   secondaryUrl,
   secondaryLabel,
 }: LinkFields & { workspaceId: string }) {
@@ -30,6 +35,7 @@ export function buildInitialCampaignLinks({
     slug: string;
     label: string;
     destinationUrl: string;
+    destinationUrlBr: string | null;
   }[] = [];
 
   if (primaryUrl) {
@@ -38,6 +44,7 @@ export function buildInitialCampaignLinks({
       slug: generateTrackedLinkSlug(),
       label: PRIMARY_LINK_LABEL,
       destinationUrl: primaryUrl,
+      destinationUrlBr: primaryUrlBr || null,
     });
   }
   if (secondaryUrl) {
@@ -46,6 +53,7 @@ export function buildInitialCampaignLinks({
       slug: generateTrackedLinkSlug(),
       label: secondaryLabel?.trim() || DEFAULT_LINK_BUTTON_LABEL,
       destinationUrl: secondaryUrl,
+      destinationUrlBr: null,
     });
   }
 
@@ -79,13 +87,15 @@ export async function syncCampaignLinks(
     workspaceId,
     automationId,
     primaryUrl,
+    primaryUrlBr,
     secondaryUrl,
     secondaryLabel,
   }: LinkFields & { workspaceId: string; automationId: string }
 ) {
   const primaryChanged = primaryUrl !== undefined && primaryUrl !== null;
+  const primaryBrChanged = primaryUrlBr !== undefined && primaryUrlBr !== null;
   const secondaryChanged = secondaryUrl !== undefined && secondaryUrl !== null;
-  if (!primaryChanged && !secondaryChanged) return;
+  if (!primaryChanged && !primaryBrChanged && !secondaryChanged) return;
 
   const [primary, secondary, ...rest] = await tx.trackedLink.findMany({
     where: { automationId },
@@ -103,7 +113,12 @@ export async function syncCampaignLinks(
     } else if (primary) {
       await tx.trackedLink.update({
         where: { id: primary.id },
-        data: { destinationUrl: primaryUrl },
+        data: {
+          destinationUrl: primaryUrl,
+          ...(primaryBrChanged
+            ? { destinationUrlBr: primaryUrlBr || null }
+            : {}),
+        },
       });
     } else {
       first = await tx.trackedLink.create({
@@ -113,11 +128,19 @@ export async function syncCampaignLinks(
           slug: generateTrackedLinkSlug(),
           label: PRIMARY_LINK_LABEL,
           destinationUrl: primaryUrl,
+          destinationUrlBr: primaryUrlBr || null,
           position: 0,
         },
         select: { id: true, position: true },
       });
     }
+  } else if (primaryBrChanged && primary) {
+    // Only the Brazil destination changed: it is stored on the primary link,
+    // and without one there is nothing to attach it to.
+    await tx.trackedLink.update({
+      where: { id: primary.id },
+      data: { destinationUrlBr: primaryUrlBr || null },
+    });
   }
 
   let second: StoredLink | undefined = secondary;

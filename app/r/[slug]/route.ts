@@ -10,6 +10,14 @@ type RedirectRouteProps = {
   params: Promise<{ slug: string }>;
 };
 
+// Whether the visitor looks like they are in Brazil: Vercel's country header
+// is checked first, and a pt-BR Accept-Language is the fallback signal.
+function isBrazilRequest(request: NextRequest): boolean {
+  if (request.headers.get("x-vercel-ip-country") === "BR") return true;
+  const language = request.headers.get("accept-language")?.toLowerCase() ?? "";
+  return language.includes("pt-br");
+}
+
 export async function GET(request: NextRequest, { params }: RedirectRouteProps) {
   const { slug } = await params;
   const trackedLink = await prisma.trackedLink.findUnique({
@@ -19,6 +27,7 @@ export async function GET(request: NextRequest, { params }: RedirectRouteProps) 
       workspaceId: true,
       automationId: true,
       destinationUrl: true,
+      destinationUrlBr: true,
       automation: {
         select: {
           instagramAccountId: true,
@@ -46,5 +55,12 @@ export async function GET(request: NextRequest, { params }: RedirectRouteProps) 
     },
   });
 
-  return NextResponse.redirect(trackedLink.destinationUrl, { status: 302 });
+  // A link with a Brazil destination sends Brazil visitors there; everyone
+  // else follows the default destination.
+  const destinationUrl =
+    trackedLink.destinationUrlBr && isBrazilRequest(request)
+      ? trackedLink.destinationUrlBr
+      : trackedLink.destinationUrl;
+
+  return NextResponse.redirect(destinationUrl, { status: 302 });
 }

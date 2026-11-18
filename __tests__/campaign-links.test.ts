@@ -12,11 +12,13 @@ type Row = {
   slug: string;
   label: string | null;
   destinationUrl: string;
+  destinationUrlBr: string | null;
   position: number;
   createdAt: Date;
 };
 
 const PRIMARY = "https://example.com/primary";
+const PRIMARY_BR = "https://example.com/primary-br";
 const SECOND = "https://example.com/second";
 const THIRD = "https://example.com/third";
 const CREATED = new Date("2026-05-01T00:00:00.000Z");
@@ -78,6 +80,7 @@ function link(overrides: Partial<Row> & Pick<Row, "id">): Row {
     slug: `slug_${overrides.id}`,
     label: null,
     destinationUrl: PRIMARY,
+    destinationUrlBr: null,
     position: 0,
     createdAt: CREATED,
     ...overrides,
@@ -103,6 +106,7 @@ function buttons() {
 
 function save(fields: {
   primaryUrl?: string | null;
+  primaryUrlBr?: string | null;
   secondaryUrl?: string | null;
   secondaryLabel?: string | null;
 }) {
@@ -256,6 +260,66 @@ describe("syncCampaignLinks", () => {
 
     expect(rows).toEqual([other]);
   });
+
+  it("stores the Brazil destination on a primary link it creates", async () => {
+    await save({ primaryUrl: PRIMARY, primaryUrlBr: PRIMARY_BR });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      destinationUrl: PRIMARY,
+      destinationUrlBr: PRIMARY_BR,
+      position: 0,
+    });
+  });
+
+  it("sets and clears the Brazil destination on an existing primary link", async () => {
+    rows = [primaryLink()];
+
+    await save({ primaryUrlBr: PRIMARY_BR });
+    expect(rows[0].destinationUrl).toBe(PRIMARY);
+    expect(rows[0].destinationUrlBr).toBe(PRIMARY_BR);
+
+    await save({ primaryUrlBr: "" });
+    expect(rows[0].destinationUrlBr).toBeNull();
+  });
+
+  it("updates the Brazil destination alongside a new primary URL", async () => {
+    rows = [primaryLink()];
+
+    await save({ primaryUrl: "https://example.com/new", primaryUrlBr: PRIMARY_BR });
+
+    expect(rows[0]).toMatchObject({
+      destinationUrl: "https://example.com/new",
+      destinationUrlBr: PRIMARY_BR,
+    });
+  });
+
+  it("leaves the Brazil destination alone when the save does not mention it", async () => {
+    rows = [link({ id: "link_a", destinationUrlBr: PRIMARY_BR })];
+
+    await save({ primaryUrl: "https://example.com/new" });
+
+    expect(rows[0].destinationUrlBr).toBe(PRIMARY_BR);
+  });
+
+  it("ignores a Brazil destination when the campaign has no links", async () => {
+    // The Brazil destination lives on the primary link; with no link at all
+    // there is nothing to attach it to, and no link is created for it.
+    await save({ primaryUrlBr: PRIMARY_BR });
+
+    expect(rows).toEqual([]);
+  });
+
+  it("removes the Brazil destination with the primary link", async () => {
+    rows = [
+      link({ id: "link_a", destinationUrlBr: PRIMARY_BR, position: 0 }),
+      secondLink(),
+    ];
+
+    await save({ primaryUrl: "" });
+
+    expect(rows.map((row) => row.id)).toEqual(["link_b"]);
+  });
 });
 
 describe("buildInitialCampaignLinks", () => {
@@ -289,5 +353,31 @@ describe("buildInitialCampaignLinks", () => {
     expect(
       buildInitialCampaignLinks({ workspaceId: "workspace_123", primaryUrl: null })
     ).toEqual([]);
+  });
+
+  it("puts the Brazil destination on the primary link only", () => {
+    const links = buildInitialCampaignLinks({
+      workspaceId: "workspace_123",
+      primaryUrl: PRIMARY,
+      primaryUrlBr: PRIMARY_BR,
+      secondaryUrl: SECOND,
+      secondaryLabel: "Read the guide",
+    });
+
+    expect(links).toMatchObject([
+      { position: 0, destinationUrl: PRIMARY, destinationUrlBr: PRIMARY_BR },
+      { position: 1, destinationUrl: SECOND, destinationUrlBr: null },
+    ]);
+  });
+
+  it("leaves the Brazil destination empty when none is given", () => {
+    const links = buildInitialCampaignLinks({
+      workspaceId: "workspace_123",
+      primaryUrl: PRIMARY,
+    });
+
+    expect(links).toMatchObject([
+      { position: 0, destinationUrl: PRIMARY, destinationUrlBr: null },
+    ]);
   });
 });

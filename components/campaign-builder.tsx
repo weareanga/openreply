@@ -55,7 +55,11 @@ interface LoadedCampaign {
   publicReplyMessages: string[];
   isActive: boolean;
   instagramAccountId: string;
-  trackedLinks?: { destinationUrl: string; label?: string | null }[];
+  trackedLinks?: {
+    destinationUrl: string;
+    destinationUrlBr?: string | null;
+    label?: string | null;
+  }[];
 }
 
 interface CampaignBuilderProps {
@@ -173,6 +177,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
   const [dmMessage, setDmMessage] = useState("");
   const [linkOpen, setLinkOpen] = useState(false);
   const [trackedDestinationUrl, setTrackedDestinationUrl] = useState("");
+  const [trackedDestinationUrlBr, setTrackedDestinationUrlBr] = useState("");
   const [linkButtonLabel, setLinkButtonLabel] = useState("Open link");
   const [secondLinkOpen, setSecondLinkOpen] = useState(false);
   const [secondaryDestinationUrl, setSecondaryDestinationUrl] = useState("");
@@ -280,6 +285,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         setIsActive(c.isActive);
         const link = c.trackedLinks?.[0]?.destinationUrl ?? "";
         setTrackedDestinationUrl(link);
+        setTrackedDestinationUrlBr(c.trackedLinks?.[0]?.destinationUrlBr ?? "");
         setLinkOpen(Boolean(link));
         const secondLink = c.trackedLinks?.[1];
         setSecondaryDestinationUrl(secondLink?.destinationUrl ?? "");
@@ -345,6 +351,9 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
     );
     const link = row.trackedUrl ?? "";
     setTrackedDestinationUrl(link);
+    // Import rows carry no Brazil destination; clear any value left over
+    // from the previous row or an earlier edit.
+    setTrackedDestinationUrlBr("");
     setLinkOpen(Boolean(link));
     setError(null);
   }
@@ -422,6 +431,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         ? publicReplyMessages.map((m) => m.trim()).filter(Boolean)
         : [],
       trackedDestinationUrl: trackedDestinationUrl.trim() || "",
+      trackedDestinationUrlBr: trackedDestinationUrlBr.trim() || "",
       linkButtonLabel: linkButtonLabel.trim() || "Open link",
       secondaryDestinationUrl: secondaryDestinationUrl.trim() || "",
       secondaryButtonLabel: secondaryButtonLabel.trim() || "Open link",
@@ -898,6 +908,15 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
                   placeholder="https://yourlink.com/offer"
                   className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-zinc-500 focus:border-accent/40 focus:outline-none"
                 />
+                <input
+                  value={trackedDestinationUrlBr}
+                  onChange={(e) => setTrackedDestinationUrlBr(e.target.value)}
+                  placeholder={t("Brazil store link (optional)")}
+                  className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-zinc-500 focus:border-accent/40 focus:outline-none"
+                />
+                <p className="text-xs text-muted">
+                  {t("Visitors in Brazil are sent to the Brazil store link instead of the link above.")}
+                </p>
                 <input
                   value={linkButtonLabel}
                   onChange={(e) => setLinkButtonLabel(e.target.value)}
