@@ -14,7 +14,10 @@ const failure = (code = 1) => new Response(JSON.stringify({
 function installGraph(broken: number[] = [], total = 55, pageCap = 50) {
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
-    expect(url.origin).toBe("https://graph.instagram.com");
+    // Unified Login moved feature calls to the Facebook Graph host; this
+    // stays the assertion that requests are rebuilt on our trusted host
+    // rather than following Meta's paging URLs.
+    expect(url.origin).toBe("https://graph.facebook.com");
     expect(url.pathname).toMatch(/\/owner\/conversations$/);
     expect(url.searchParams.has("access_token")).toBe(false);
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer " + token);
